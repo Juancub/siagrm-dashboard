@@ -443,11 +443,15 @@ with tabs[0]:
     c5, c6 = st.columns(2)
     with c5:
         st.markdown("#### Resumen del modelo")
+
+        # Preparar representación segura de ROC_AUC
+        ROC_AUC_STR = f"{ROC_AUC:.4f}" if ROC_AUC is not None else "N/D"
+
         st.markdown(f"""
         - **Modelo canónico:** {MODELO_CANONICO}
         - **Runtime:** {MODELO_RUNTIME}
         - **Calibración:** {METODO_CALIBRACION}
-        - **ROC-AUC:** {ROC_AUC:.4f}" if ROC_AUC is not None else "N/D"}
+        - **ROC-AUC:** {ROC_AUC_STR}
         - **Threshold modelo:** {THRESHOLD:.6f}
         - **Umbral Alto:** {UMBRAL_ALTO:.4f}
         - **Umbral Crítico:** {UMBRAL_CRITICO:.4f}
