@@ -353,37 +353,55 @@ def predecir_simulacion(row_df):
 def construir_fila_simulacion(data_dict):
     """Reproduce el simulador del notebook.
 
-    En lugar de crear una fila sintética desde SIM_BASE, se toma un registro real
-    del SSOT como base y sólo se sobrescriben las 5 variables editables del
-    simulador. Esto preserva el resto del contexto RAW (categoria_municipio,
-    modalidad_linea, sector_ies, rango_valor_total, etc.), evitando que el score
-    varíe por una combinación artificial de categorías.
+    La diferencia crítica es que la app debe usar un registro real del SSOT que
+    coincida exactamente con las 5 variables editables del simulador, y no una
+    fila cualquiera de la base. Eso preserva el resto del contexto RAW
+    (categoria_municipio, modalidad_linea, sector_ies, rango_valor_total, etc.)
+    y hace que el score coincida con el notebook.
     """
     if not SIM_BASE:
         raise RuntimeError("SIM_BASE_23 no está disponible en la configuración.")
     if SEGMENTOS is None or SEGMENTOS.empty:
         raise RuntimeError("La base SEGMENTOS no está disponible para la simulación.")
 
-    # Baseline real: igual que en el notebook, se parte de una fila observada del
-    # SSOT y se reemplazan solo las columnas editables por el usuario.
-    fila_base = SEGMENTOS.loc[:, RAW_INPUTS].dropna(how='all').head(1)
+    data_dict = data_dict or {}
+
+    # 1) Buscar la fila real del SSOT que coincide exactamente con el perfil elegido
+    # en los campos canónicos editables. Esto es lo que hace el notebook.
+    fila_base = SEGMENTOS.loc[:, RAW_INPUTS].dropna(how='all').head(1).copy()
+    if FEATURE_INPUTS:
+        mascara = pd.Series(True, index=SEGMENTOS.index)
+        for col in FEATURE_INPUTS:
+            if col not in SEGMENTOS.columns or col not in data_dict:
+                continue
+            valor = data_dict[col]
+            if pd.isna(valor):
+                continue
+            valor_norm = str(valor).strip()
+            if isinstance(valor, str):
+                mascara &= SEGMENTOS[col].astype(str).str.strip().str.lower().eq(valor_norm.lower())
+            else:
+                mascara &= SEGMENTOS[col].astype(str).str.strip().str.lower().eq(str(valor).lower())
+        if mascara.any():
+            fila_base = SEGMENTOS.loc[mascara, RAW_INPUTS].head(1).copy()
+
     if fila_base.empty:
         raise RuntimeError("No hay una fila base válida en SEGMENTOS para reconstruir el registro RAW.")
 
     fila = fila_base.iloc[0].copy()
 
-    # 1) Aplicar valores editables sobre la fila real
+    # 2) Aplicar valores editables sobre la fila real
     for col, valor in data_dict.items():
         if col in fila.index:
             fila[col] = valor
 
-    # 2) Si no hubo valor entregado para una variable editable, usar SIM_BASE
+    # 3) Si no hubo valor entregado para una variable editable, usar SIM_BASE
     for col in FEATURE_INPUTS:
         if col in fila.index and pd.isna(fila[col]):
             if col in SIM_BASE:
                 fila[col] = SIM_BASE.get(col)
 
-    # 3) Asegurar que todas las columnas RAW necesarias existan y no queden vacías
+    # 4) Asegurar que todas las columnas RAW necesarias existan y no queden vacías
     for col in RAW_INPUTS:
         if col not in fila.index or pd.isna(fila[col]):
             if col in SIM_BASE:
@@ -394,7 +412,7 @@ def construir_fila_simulacion(data_dict):
             else:
                 fila[col] = np.nan
 
-    # 4) Mantener exactamente el orden y el tipo del contrato RAW del notebook
+    # 5) Mantener exactamente el orden y el tipo del contrato RAW del notebook
     return fila[RAW_INPUTS].to_frame().T
 
 
