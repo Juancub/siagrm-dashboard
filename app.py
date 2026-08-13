@@ -261,6 +261,14 @@ COMPARISON = datos['comparison']
 IMPORTANCE = datos['importance']
 QA_REPORT = datos['qa_report']
 
+PREFLIGHT_SCORE = None
+PRE_FLIGHT_ROW = None
+try:
+    PREFLIGHT_SCORE, PRE_FLIGHT_ROW = obtener_preflight()
+except Exception:
+    PREFLIGHT_SCORE = None
+    PRE_FLIGHT_ROW = None
+
 # Asegurar tipos
 if 'score_riesgo' in SEGMENTOS.columns:
     SEGMENTOS['score_riesgo'] = pd.to_numeric(SEGMENTOS['score_riesgo'], errors='coerce').clip(0, 1)
@@ -341,16 +349,79 @@ def predecir_simulacion(row_df):
     # Ruta 3: Fallback - no hay modelo disponible
     raise RuntimeError("No se pudo realizar la inferencia. Verifica que el modelo y preprocesador estén correctamente exportados.")
 
+
 def construir_fila_simulacion(data_dict):
-    """Construye una fila RAW completa basada en SIM_BASE con las 5 variables editables."""
+    """Reproduce el simulador del notebook.
+
+    En lugar de crear una fila sintética desde SIM_BASE, se toma un registro real
+    del SSOT como base y sólo se sobrescriben las 5 variables editables del
+    simulador. Esto preserva el resto del contexto RAW (categoria_municipio,
+    modalidad_linea, sector_ies, rango_valor_total, etc.), evitando que el score
+    varíe por una combinación artificial de categorías.
+    """
     if not SIM_BASE:
         raise RuntimeError("SIM_BASE_23 no está disponible en la configuración.")
-    
-    fila = pd.DataFrame([SIM_BASE.copy()])
-    for col, val in data_dict.items():
-        if col in fila.columns:
-            fila[col] = val
-    return fila
+    if SEGMENTOS is None or SEGMENTOS.empty:
+        raise RuntimeError("La base SEGMENTOS no está disponible para la simulación.")
+
+    # Baseline real: igual que en el notebook, se parte de una fila observada del
+    # SSOT y se reemplazan solo las columnas editables por el usuario.
+    fila_base = SEGMENTOS.loc[:, RAW_INPUTS].dropna(how='all').head(1)
+    if fila_base.empty:
+        raise RuntimeError("No hay una fila base válida en SEGMENTOS para reconstruir el registro RAW.")
+
+    fila = fila_base.iloc[0].copy()
+
+    # 1) Aplicar valores editables sobre la fila real
+    for col, valor in data_dict.items():
+        if col in fila.index:
+            fila[col] = valor
+
+    # 2) Si no hubo valor entregado para una variable editable, usar SIM_BASE
+    for col in FEATURE_INPUTS:
+        if col in fila.index and pd.isna(fila[col]):
+            if col in SIM_BASE:
+                fila[col] = SIM_BASE.get(col)
+
+    # 3) Asegurar que todas las columnas RAW necesarias existan y no queden vacías
+    for col in RAW_INPUTS:
+        if col not in fila.index or pd.isna(fila[col]):
+            if col in SIM_BASE:
+                fila[col] = SIM_BASE.get(col)
+            elif col in SEGMENTOS.columns:
+                modo = SEGMENTOS[col].dropna().mode()
+                fila[col] = modo.iloc[0] if not modo.empty else np.nan
+            else:
+                fila[col] = np.nan
+
+    # 4) Mantener exactamente el orden y el tipo del contrato RAW del notebook
+    return fila[RAW_INPUTS].to_frame().T
+
+
+def obtener_preflight():
+    """Reproduce el preflight del notebook: valida que el registro base pueda inferir un score finito."""
+    if not FEATURE_INPUTS:
+        raise RuntimeError("FEATURE_INPUTS_23 no está configurado.")
+
+    valores_preflight = {}
+    for col in FEATURE_INPUTS:
+        if col in SIM_BASE and SIM_BASE.get(col) is not None:
+            valores_preflight[col] = SIM_BASE[col]
+        elif col in SEGMENTOS.columns and not SEGMENTOS[col].dropna().empty:
+            valores_preflight[col] = SEGMENTOS[col].dropna().iloc[0]
+        else:
+            raise RuntimeError(f"No se pudo construir el valor de preflight para la variable {col}.")
+
+    fila = construir_fila_simulacion(valores_preflight)
+    score = predecir_simulacion(fila)
+
+    if not np.isfinite(score):
+        raise RuntimeError("El preflight del simulador produjo un score no finito.")
+    if not 0.0 <= score <= 1.0:
+        raise RuntimeError(f"El score del preflight está fuera de [0,1]: {score}")
+
+    return score, fila
+
 
 def profile_data(profile_col):
     """Genera datos de perfil agregados."""
@@ -490,9 +561,10 @@ with tabs[1]:
 # =============================================================================
 # TAB 3: VARIABLES EXPLICATIVAS
 # =============================================================================
+# TAB 3: VARIABLES EXPLICATIVAS (adaptado a columnas: Variable, Importancia, Participacion_pct, Tipo)
 with tabs[2]:
     if IMPORTANCE is not None and not IMPORTANCE.empty:
-        col_x = 'participacion_pct' if 'participacion_pct' in IMPORTANCE.columns else 'importancia'
+        col_x = 'Participacion_pct' if 'Participacion_pct' in IMPORTANCE.columns else 'Importancia'
         col_y = 'variable_original' if 'variable_original' in IMPORTANCE.columns else (IMPORTANCE.columns[0] if len(IMPORTANCE.columns) > 0 else None)
         
         if col_y:
@@ -659,20 +731,27 @@ with tabs[7]:
     
     with col_result:
         st.markdown("#### Resultado de la predicción")
-        
+
+        if PREFLIGHT_SCORE is not None:
+            st.caption(f"Preflight del notebook: {PREFLIGHT_SCORE:.6f} | Validado antes de la inferencia final.")
+
+        if PRE_FLIGHT_ROW is not None:
+            with st.expander("Ver registro base de preflight"):
+                st.dataframe(PRE_FLIGHT_ROW, use_container_width=True)
+
         if calcular:
             try:
                 with st.spinner("Calculando score de riesgo..."):
                     # 1. Construir fila RAW completa
                     row = construir_fila_simulacion(sim_values)
-                    
+
                     # 2. Inferencia
                     probability = predecir_simulacion(row)
-                    
+
                     # 3. Clasificación
                     level, color, action = clasificar_riesgo(probability)
                     alerta = probability >= UMBRAL_ALTO
-                    
+
                     # 4. Mostrar resultado
                     st.markdown(f"""
                         <div style="background-color: white; border-radius: 16px; padding: 24px; 
@@ -703,7 +782,7 @@ with tabs[7]:
                             </div>
                         </div>
                     """, unsafe_allow_html=True)
-                    
+
                     # Gauge chart
                     fig = go.Figure(go.Indicator(
                         mode="gauge+number",
@@ -728,11 +807,11 @@ with tabs[7]:
                     ))
                     fig.update_layout(height=350, margin=dict(l=20, r=20, t=50, b=20))
                     st.plotly_chart(fig, use_container_width=True)
-                    
+
                     # Mostrar fila construida para transparencia
                     with st.expander("Ver registro RAW construido"):
                         st.dataframe(row, use_container_width=True)
-            
+
             except Exception as e:
                 st.error(f"❌ Error en la simulación: {str(e)}")
                 st.info("Verifica que el modelo y preprocesador estén correctamente exportados.")
